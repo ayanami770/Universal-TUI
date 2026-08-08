@@ -27,8 +27,10 @@ asan: examples/demo.c utui.c utui.h
 
 test: demo
 	python3 tests/test_demo.py ./demo
+	$(CC) $(CFLAGS) -I. -o test-config tests/test_config.c utui.c
+	./test-config
 
 clean:
-	rm -f *.o *.a demo demo-asan demo.exe
+	rm -f *.o *.a demo demo-asan demo.exe test-config test.config
 
 .PHONY: all windows asan test clean

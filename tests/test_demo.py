@@ -6,7 +6,7 @@ navigates, edits every item kind, and saves/loads correctly — without a real t
 """
 import fcntl, re, os, pty, select, signal, struct, subprocess, sys, termios, time, tempfile
 
-BIN = sys.argv[1] if len(sys.argv) > 1 else "./demo"
+BIN = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "./demo")
 CFG = "acme-server.config"
 ANSI = re.compile(rb"\x1b\[[0-9;?<]*[A-Za-z~]|\x1b.")
 FAILED = []
