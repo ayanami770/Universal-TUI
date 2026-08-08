@@ -1202,7 +1202,13 @@ static int load_quoted(char *dst, size_t cap, const char *src)
                 ch = (unsigned char)(hi * 16 + lo); i += 2;
                 if (ch == 0) return -1;
             }
-            else if (ch != '\\' && ch != '"') return -1;
+            else if (ch != '\\' && ch != '"') {
+                /* 未知のエスケープはリテラルの '\\' として扱い、続く文字も保持
+                   する (save_quoted は既知エスケープしか出さないので新しい保存
+                   データには無影響。旧データの素の '\\' を失わないための寛容化)。 */
+                if (o + 1 >= cap) return -1;
+                dst[o++] = '\\';
+            }
         }
         if (o + 1 >= cap) return -1;
         dst[o++] = (char)ch;
@@ -1214,7 +1220,8 @@ static int load_quoted(char *dst, size_t cap, const char *src)
 static int decimal_value(const char *s)
 {
     const unsigned char *p = (const unsigned char *)s;
-    if (!*p) return 0;
+    if (*p == '-') p++;                  /* 先頭の符号を許可 (負の整数値) */
+    if (!*p) return 0;                   /* 数字が無い ("" や "-" 単独) は不正 */
     for (; *p; p++) if (!isdigit(*p)) return 0;
     return 1;
 }
@@ -1254,7 +1261,7 @@ static int load_config(const char *path)
             } else if (it->type == UT_TYPE_STR) {
                 char decoded[sizeof it->strval];
                 if (load_quoted(decoded, sizeof decoded, val) == 0)
-                    memcpy(it->strval, decoded, sizeof decoded);
+                    memcpy(it->strval, decoded, strlen(decoded) + 1);
             } else if (it->type == UT_TYPE_INT) {
                 size_t len = strlen(val);
                 if (len < sizeof it->strval && decimal_value(val))

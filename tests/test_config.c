@@ -42,6 +42,24 @@ int main(void)
     assert(strcmp(items[1].strval, "8") == 0);
     assert(items[2].value == 0); /* reset, but malformed 'yes' is not accepted */
 
+    /* 負の整数値を受理する (decimal_value が先頭の符号を許可) */
+    f = fopen("test.config", "w");
+    assert(f != NULL);
+    fputs("CONFIG_TEST_NUMBER=-5\n", f);
+    fclose(f);
+    strcpy(items[1].strval, "8");
+    assert(ut_load(&root, &app, "test.config") == 0);
+    assert(strcmp(items[1].strval, "-5") == 0);
+
+    /* 未知エスケープ (\b) は素の '\' として保持する = 旧データの後方互換 */
+    f = fopen("test.config", "w");
+    assert(f != NULL);
+    fputs("CONFIG_TEST_TEXT=\"a\\bc\"\n", f);
+    fclose(f);
+    strcpy(items[0].strval, "x");
+    assert(ut_load(&root, &app, "test.config") == 0);
+    assert(strcmp(items[0].strval, "a\\bc") == 0);
+
     items[0].sym = "BAD\nINJECT";
     assert(ut_save(&root, &app, "test.config") == -1);
     remove("test.config");
