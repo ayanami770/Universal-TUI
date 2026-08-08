@@ -1,0 +1,7 @@
+*.o
+*.a
+demo
+demo-asan
+demo.exe
+*.config
+*.render.png
