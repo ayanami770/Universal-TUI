@@ -348,12 +348,18 @@ static void put(int x, int y, const char *glyph, int fg, int bg, int bold)
 
 static void putc_at(int x, int y, char ch, int fg, int bg, int bold)
 {
-    char s[2]; s[0] = ch; s[1] = 0; put(x, y, s, fg, bg, bold);
+    unsigned char uch = (unsigned char)ch;
+    char s[2];
+    s[0] = (uch < 32 || uch == 127) ? '?' : ch;
+    s[1] = 0;
+    put(x, y, s, fg, bg, bold);
 }
 
 static void puts_at(int x, int y, const char *s, int fg, int bg, int bold)
 {
-    int i; for (i = 0; s[i]; i++) putc_at(x + i, y, s[i], fg, bg, bold);
+    int i;
+    /* putc_at keeps application/config data from becoming control sequences. */
+    for (i = 0; s[i]; i++) putc_at(x + i, y, s[i], fg, bg, bold);
 }
 
 static void fill(int x, int y, int w, int h, const char *g, int fg, int bg, int bold)
@@ -513,10 +519,9 @@ static Key getkey(void)
                             if (pc == 0x1b) {         /* ESC[201~ を検出 */
                                 int a = readbyte(60), b = readbyte(60);
                                 int d = readbyte(60), e = readbyte(60);
-                                int f = readbyte(60), h = readbyte(60);
+                                int f = readbyte(60);
                                 if (a=='[' && b=='2' && d=='0' && e=='1' && f=='~')
                                     break;
-                                (void)h;              /* 途中終端は無視して抜ける */
                                 break;
                             }
                             if (pn < PASTE_MAX - 1 && pc >= 32 && pc < 127)
@@ -1030,6 +1035,54 @@ static void sym_name(char *buf, size_t n, const char *sym)
     else         snprintf(buf, n, "%s", sym);
 }
 
+static int valid_symbol_part(const char *s, int allow_empty)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    if (!s) return allow_empty;
+    if (!*s && !allow_empty) return 0;
+    for (; *p; p++) if (!isalnum(*p) && *p != '_') return 0;
+    return 1;
+}
+
+static int validate_tree(const UtItem *it, int depth)
+{
+    int i;
+    if (!it || depth >= MAX_DEPTH || it->nchild < 0 ||
+        (it->nchild > 0 && !it->children) ||
+        (it->type < UT_TYPE_MENU || it->type > UT_TYPE_COMMENT)) return 0;
+    if ((it->type == UT_TYPE_STR || it->type == UT_TYPE_INT) &&
+        !memchr(it->strval, 0, sizeof it->strval)) return 0;
+    if (it->type == UT_TYPE_CHOICE &&
+        (it->nchild <= 0 || it->value < 0 || it->value >= it->nchild)) return 0;
+    if (it->sym && !valid_symbol_part(it->sym, 0)) return 0;
+    for (i = 0; i < it->nchild; i++)
+        if (!validate_tree(&it->children[i], depth + 1)) return 0;
+    return 1;
+}
+
+static int valid_request(const UtItem *root, const UtApp *app, const char *path)
+{
+    return root && root->type == UT_TYPE_MENU && app && app->title && path && *path &&
+           valid_symbol_part(app->sym_prefix, 1) && validate_tree(root, 0);
+}
+
+static void save_quoted(FILE *f, const char *s)
+{
+    const unsigned char *p;
+    fputc('"', f);
+    for (p = (const unsigned char *)s; *p; p++) {
+        if (*p == '"' || *p == '\\') fputc('\\', f);
+        /* strval normally comes from the ASCII-only editor, but public callers
+         * may fill it directly.  Encode controls rather than injecting lines. */
+        if (*p == '\n') { fputs("\\n", f); continue; }
+        if (*p == '\r') { fputs("\\r", f); continue; }
+        if (*p == '\t') { fputs("\\t", f); continue; }
+        if (*p < 32 || *p == 127) { fprintf(f, "\\x%02X", *p); continue; }
+        fputc(*p, f);
+    }
+    fputc('"', f);
+}
+
 static void save_walk(FILE *f, UtItem *m)
 {
     int i;
@@ -1054,7 +1107,8 @@ static void save_walk(FILE *f, UtItem *m)
             break;
         case UT_TYPE_STR:
             if (it->sym) { sym_name(nm, sizeof nm, it->sym);
-                fprintf(f, "CONFIG_%s=\"%s\"\n", nm, it->strval); }
+                fprintf(f, "CONFIG_%s=", nm); save_quoted(f, it->strval);
+                fputc('\n', f); }
             break;
         case UT_TYPE_INT:
             if (it->sym) { sym_name(nm, sizeof nm, it->sym);
@@ -1125,6 +1179,46 @@ static const char *strip_prefix(const char *sym)
     return sym;
 }
 
+static int load_quoted(char *dst, size_t cap, const char *src)
+{
+    size_t o = 0, i = 1, n = strlen(src);
+    if (n < 2 || src[0] != '"' || src[n - 1] != '"') return -1;
+    while (i < n - 1) {
+        unsigned char ch = (unsigned char)src[i++];
+        if (ch == '\\') {
+            if (i >= n - 1) return -1;
+            ch = (unsigned char)src[i++];
+            if (ch == 'n') ch = '\n';
+            else if (ch == 'r') ch = '\r';
+            else if (ch == 't') ch = '\t';
+            else if (ch == 'x') {
+                int hi, lo;
+                if (i + 1 >= n - 1 || !isxdigit((unsigned char)src[i]) ||
+                    !isxdigit((unsigned char)src[i + 1])) return -1;
+                hi = isdigit((unsigned char)src[i]) ? src[i] - '0' :
+                     tolower((unsigned char)src[i]) - 'a' + 10;
+                lo = isdigit((unsigned char)src[i + 1]) ? src[i + 1] - '0' :
+                     tolower((unsigned char)src[i + 1]) - 'a' + 10;
+                ch = (unsigned char)(hi * 16 + lo); i += 2;
+                if (ch == 0) return -1;
+            }
+            else if (ch != '\\' && ch != '"') return -1;
+        }
+        if (o + 1 >= cap) return -1;
+        dst[o++] = (char)ch;
+    }
+    dst[o] = 0;
+    return 0;
+}
+
+static int decimal_value(const char *s)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    if (!*p) return 0;
+    for (; *p; p++) if (!isdigit(*p)) return 0;
+    return 1;
+}
+
 static int load_config(const char *path)
 {
     char line[512];
@@ -1149,19 +1243,22 @@ static int load_config(const char *path)
             it = bare ? find_sym(g_root_ptr, bare) : NULL;
             if (!it) continue;
             if (it->type == UT_TYPE_RADIO) {
-                if (val[0] == 'y' && it->parent) it->parent->value = it->idx;
+                if (strcmp(val, "y") == 0 && it->parent) it->parent->value = it->idx;
             } else if (it->type == UT_TYPE_BOOL) {
-                if (!it->forced) it->value = (val[0] == 'y') ? 2 : 0;
+                if (!it->forced && (strcmp(val, "y") == 0 || strcmp(val, "n") == 0))
+                    it->value = strcmp(val, "y") == 0 ? 2 : 0;
             } else if (it->type == UT_TYPE_TRI) {
-                it->value = (val[0] == 'y') ? 2 : (val[0] == 'm') ? 1 : 0;
+                if (strcmp(val, "y") == 0) it->value = 2;
+                else if (strcmp(val, "m") == 0) it->value = 1;
+                else if (strcmp(val, "n") == 0) it->value = 0;
             } else if (it->type == UT_TYPE_STR) {
-                size_t l = strlen(val);
-                if (l >= 2 && val[0] == '"' && val[l-1] == '"') {
-                    val[l-1] = 0;
-                    snprintf(it->strval, sizeof it->strval, "%.63s", val + 1);
-                }
+                char decoded[sizeof it->strval];
+                if (load_quoted(decoded, sizeof decoded, val) == 0)
+                    memcpy(it->strval, decoded, sizeof decoded);
             } else if (it->type == UT_TYPE_INT) {
-                snprintf(it->strval, sizeof it->strval, "%.63s", val);
+                size_t len = strlen(val);
+                if (len < sizeof it->strval && decimal_value(val))
+                    memcpy(it->strval, val, len + 1);
             }
         }
     }
@@ -1254,6 +1351,7 @@ static void jump_to(UtItem *target)
 {
     UtItem *path[MAX_DEPTH]; int np = 0, i;
     UtItem *p;
+    if (!target) return;
     for (p = target; p; p = p->parent) if (np < MAX_DEPTH) path[np++] = p;
     g_depth = 0;
     g_stack[0].menu = g_root_ptr; g_stack[0].top = 0; g_stack[0].btn = 0;
@@ -1537,6 +1635,7 @@ static int auto_ascii(void)
 
 int ut_load(UtItem *root, const UtApp *app, const char *path)
 {
+    if (!valid_request(root, app, path)) return -1;
     g_app = app; g_root_ptr = root;
     init_tree(root);
     return load_config(path);
@@ -1544,6 +1643,7 @@ int ut_load(UtItem *root, const UtApp *app, const char *path)
 
 int ut_save(UtItem *root, const UtApp *app, const char *path)
 {
+    if (!valid_request(root, app, path)) return -1;
     g_app = app; g_root_ptr = root;
     init_tree(root);
     return save_config(path);
@@ -1551,6 +1651,8 @@ int ut_save(UtItem *root, const UtApp *app, const char *path)
 
 int ut_run(UtItem *root, const UtApp *app)
 {
+    if (!root || !app || !app->config_file ||
+        !valid_request(root, app, app->config_file)) return -1;
     if (!stdio_is_tty()) return -1;
     g_app = app; g_root_ptr = root;
     g_ascii = (app->ascii == 0) ? 0 : (app->ascii > 0) ? 1 : auto_ascii();
