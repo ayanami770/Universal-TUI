@@ -7,6 +7,12 @@ Describe a tree of typed configuration items as static data, hand it to
 ASCII fallback — with **no ncurses and no dependencies** beyond libc and the OS
 terminal API.
 
+Since v1.1 the engine is **fully UTF-8 aware**: labels, help texts and string
+values may contain any UTF-8 text, East-Asian double-width characters render
+correctly, the input box edits by codepoint (Windows input arrives via
+`ReadConsoleInputW` incl. surrogate pairs and IME), and string values hold up
+to **511 bytes** — enough for long Windows paths with non-ASCII names.
+
 **Portable across POSIX (Linux / macOS / BSD) and pure Windows (Win32 Console
 API)** from one source. Rendering is direct VT100/xterm escapes; on Windows the
 engine enables `ENABLE_VIRTUAL_TERMINAL_PROCESSING` for output and translates

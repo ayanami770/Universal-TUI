@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define UTUI_VERSION "1.0"
+#define UTUI_VERSION "1.1"
 
 /* Item kinds (stored in UtItem.type). */
 enum {
@@ -40,10 +40,10 @@ typedef struct UtItem {
     int   type;                 /* one of UT_TYPE_*                            */
     int   value;                /* bool/tri: 0/1/2; choice: selected index     */
     int   forced;               /* 1 => shown as -*- and not user-changeable   */
-    const char *name;           /* prompt text                                 */
+    const char *name;           /* prompt text (UTF-8)                         */
     const char *sym;            /* CONFIG symbol (without prefix); NULL=unsaved */
     const char *help;           /* long help text (NULL => generic message)    */
-    char  strval[64];           /* value for UT_TYPE_STR / UT_TYPE_INT          */
+    char  strval[512];          /* value for UT_TYPE_STR / UT_TYPE_INT (UTF-8)  */
     struct UtItem *children;    /* submenu / choice options                    */
     int   nchild;
     struct UtItem *parent;      /* filled in by the engine                     */
