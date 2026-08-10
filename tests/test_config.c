@@ -60,6 +60,31 @@ int main(void)
     assert(ut_load(&root, &app, "test.config") == 0);
     assert(strcmp(items[0].strval, "a\\bc") == 0);
 
+    /* UTF-8 の長い値 (v1.1: strval は 512 バイト) の保存/読込ラウンドトリップ */
+    {
+        /* Windows パス風の日本語文字列を ~240 バイトに伸ばす */
+        char jp[512] = "";
+        char big[512];
+        int rep;
+        for (rep = 0; rep < 6; rep++)
+            strcat(jp, "C:\\\xE3\x82\xB5\xE3\x82\xA6\xE3\x83\xB3\xE3\x83\x89"
+                       "\\\xE6\xB1\xBA\xE5\xAE\x9A\xE3\x83\x9C\xE3\x82\xBF\xE3\x83\xB3.wav;");
+        assert(strlen(jp) > 64);                  /* 旧上限を超えていること */
+        strcpy(items[0].strval, jp);
+        assert(ut_save(&root, &app, "test.config") == 0);
+        strcpy(items[0].strval, "wiped");
+        assert(ut_load(&root, &app, "test.config") == 0);
+        assert(strcmp(items[0].strval, jp) == 0);
+
+        /* 500 バイトの ASCII 値 (上限近く) */
+        memset(big, 'a', 500); big[500] = 0;
+        strcpy(items[0].strval, big);
+        assert(ut_save(&root, &app, "test.config") == 0);
+        strcpy(items[0].strval, "wiped");
+        assert(ut_load(&root, &app, "test.config") == 0);
+        assert(strcmp(items[0].strval, big) == 0);
+    }
+
     items[0].sym = "BAD\nINJECT";
     assert(ut_save(&root, &app, "test.config") == -1);
     remove("test.config");

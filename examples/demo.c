@@ -42,6 +42,10 @@ static UtItem net_items[] = {
     UT_BOOL(2, "Enable HTTP/2", "HTTP2", NULL),
     UT_BOOL(0, "Enable IPv6", "IPV6", NULL),
     UT_SUBMENU(2, "TLS / HTTPS", "TLS", H_TLS, tls_items),
+    /* v1.1: UTF-8 の値と全角ラベルの動作確認用 (日本語で編集できる) */
+    UT_STR("Banner (UTF-8 / 日本語も可)", "BANNER", "ようこそ acme-server へ",
+           "Any UTF-8 text works here, including double-width CJK characters. "
+           "String values can hold up to 511 bytes."),
 };
 static UtItem storage_choice[] = {
     UT_RADIO("SQLite (embedded)", "DB_SQLITE"),

@@ -51,10 +51,10 @@ enum { C_BLACK, C_RED, C_GREEN, C_YELLOW, C_BLUE, C_MAGENTA, C_CYAN, C_WHITE };
 enum {                                   /* getkey() の返す仮想キー */
     K_NONE = 0x1000, K_UP, K_DOWN, K_LEFT, K_RIGHT, K_ENTER, K_ESC, K_TAB,
     K_BTAB, K_PGUP, K_PGDN, K_HOME, K_END, K_BS, K_DEL, K_RESIZE, K_QUIT,
-    K_MOUSE, K_PASTE
+    K_MOUSE, K_PASTE, K_CHAR              /* K_CHAR: 非 ASCII 印字文字 (cp) */
 };
 
-typedef struct { int type; int mb, mx, my, mpress; } Key;
+typedef struct { int type; int mb, mx, my, mpress; unsigned cp; } Key;
 
 static int  g_rows = 24, g_cols = 80;
 static int  g_ascii = 0;                 /* 1 なら罫線を +-| で描く */
@@ -64,6 +64,125 @@ static UtItem *g_root_ptr = NULL;    /* ルートメニュー */
 
 /* 早期宣言 (プラットフォーム層から使う) */
 static void buf_resize(void);
+
+/* =====================================================================
+ *  UTF-8 ユーティリティ (プラットフォーム層からも使うためここに置く)
+ * ===================================================================== */
+
+/* 1 コードポイントを復号し、消費バイト数 (1..4) を返す。不正列は 1 バイト
+ * 消費して U+FFFD を返す。s は NUL 終端であること (継続バイト読取は短絡評価
+ * で NUL を越えない)。 */
+static int u8_decode(const char *s, unsigned *cp)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    if (p[0] < 0x80) { *cp = p[0]; return 1; }
+    if (p[0] >= 0xC2 && p[0] <= 0xDF && (p[1] & 0xC0) == 0x80) {
+        *cp = ((unsigned)(p[0] & 0x1F) << 6) | (unsigned)(p[1] & 0x3F);
+        return 2;
+    }
+    if (p[0] >= 0xE0 && p[0] <= 0xEF && (p[1] & 0xC0) == 0x80 &&
+        (p[2] & 0xC0) == 0x80) {
+        unsigned c = ((unsigned)(p[0] & 0x0F) << 12)
+                   | ((unsigned)(p[1] & 0x3F) << 6) | (unsigned)(p[2] & 0x3F);
+        if (c >= 0x800 && !(c >= 0xD800 && c <= 0xDFFF)) { *cp = c; return 3; }
+    }
+    if (p[0] >= 0xF0 && p[0] <= 0xF4 && (p[1] & 0xC0) == 0x80 &&
+        (p[2] & 0xC0) == 0x80 && (p[3] & 0xC0) == 0x80) {
+        unsigned c = ((unsigned)(p[0] & 0x07) << 18)
+                   | ((unsigned)(p[1] & 0x3F) << 12)
+                   | ((unsigned)(p[2] & 0x3F) << 6) | (unsigned)(p[3] & 0x3F);
+        if (c >= 0x10000 && c <= 0x10FFFF) { *cp = c; return 4; }
+    }
+    *cp = 0xFFFD;
+    return 1;
+}
+
+/* コードポイントを UTF-8 化して out (4 バイト以上) へ。バイト数を返す。 */
+static int u8_encode(unsigned cp, char *out)
+{
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18));
+    out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+/* East Asian Width の簡易判定: 全角・広幅レンジは 2 桁、それ以外は 1 桁。
+ * (結合文字の 0 幅は扱わない: 設定 UI の用途では合成済み文字を想定) */
+static int cp_width(unsigned cp)
+{
+    if (cp < 0x1100) return 1;
+    if ((cp <= 0x115F) ||                       /* Hangul Jamo             */
+        (cp >= 0x2E80  && cp <= 0x303E) ||      /* CJK 部首〜記号          */
+        (cp >= 0x3041  && cp <= 0x33FF) ||      /* かな〜CJK 互換          */
+        (cp >= 0x3400  && cp <= 0x4DBF) ||
+        (cp >= 0x4E00  && cp <= 0x9FFF) ||
+        (cp >= 0xA000  && cp <= 0xA4CF) ||
+        (cp >= 0xAC00  && cp <= 0xD7A3) ||      /* Hangul 音節             */
+        (cp >= 0xF900  && cp <= 0xFAFF) ||
+        (cp >= 0xFE30  && cp <= 0xFE4F) ||
+        (cp >= 0xFF00  && cp <= 0xFF60) ||      /* 全角形                  */
+        (cp >= 0xFFE0  && cp <= 0xFFE6) ||
+        (cp >= 0x1F300 && cp <= 0x1F64F) ||     /* 絵文字主要ブロック      */
+        (cp >= 0x1F900 && cp <= 0x1F9FF) ||
+        (cp >= 0x20000 && cp <= 0x3FFFD))
+        return 2;
+    return 1;
+}
+
+/* 先頭 nbytes 分の表示幅 */
+static int u8_swidth_n(const char *s, size_t nbytes)
+{
+    size_t i = 0; int w = 0;
+    while (i < nbytes && s[i]) {
+        unsigned cp; int n = u8_decode(s + i, &cp);
+        w += (cp < 32 || cp == 127) ? 1 : cp_width(cp);
+        i += (size_t)n;
+    }
+    return w;
+}
+
+static int u8_swidth(const char *s) { return u8_swidth_n(s, strlen(s)); }
+
+/* 直前 / 直後のコードポイント境界 (バイトオフセット) */
+static size_t u8_prev(const char *s, size_t pos)
+{
+    while (pos > 0 && ((unsigned char)s[--pos] & 0xC0) == 0x80) {}
+    return pos;
+}
+
+static size_t u8_next(const char *s, size_t pos)
+{
+    unsigned cp;
+    if (!s[pos]) return pos;
+    return pos + (size_t)u8_decode(s + pos, &cp);
+}
+
+/* 表示幅 maxw 以内に収まる先頭部分を dst へコピー (バイト境界安全) */
+static void u8_prefix(char *dst, size_t cap, const char *src, int maxw)
+{
+    size_t o = 0, i = 0; int w = 0;
+    while (src[i]) {
+        unsigned cp; int n = u8_decode(src + i, &cp);
+        int cw = (cp < 32 || cp == 127) ? 1 : cp_width(cp);
+        if (w + cw > maxw || o + (size_t)n + 1 > cap) break;
+        memcpy(dst + o, src + i, (size_t)n);
+        o += (size_t)n; i += (size_t)n; w += cw;
+    }
+    dst[o] = 0;
+}
 
 /* =====================================================================
  *  プラットフォーム抽象層  (端末 raw 化 / 入力 1 バイト / サイズ / 出力)
@@ -203,9 +322,24 @@ static void translate_record(const INPUT_RECORD *ir)
         case 0x1B: q_push(0x1b);  return;       /* Esc   */
         default: break;
         }
-        ch = (unsigned)k->uChar.UnicodeChar;    /* 印字文字はそのまま */
-        if (ch >= 32 && ch < 127)
-            for (i = 0; i < rc; i++) q_push((int)ch);
+        ch = (unsigned)k->uChar.UnicodeChar;    /* 印字文字は UTF-8 化して積む */
+        if (ch >= 32 && ch != 127) {
+            static unsigned pend_hs = 0;        /* 保留中の上位サロゲート */
+            unsigned cp = ch;
+            char enc[4];
+            int nb, j;
+            if (ch >= 0xD800 && ch <= 0xDBFF) { pend_hs = ch; return; }
+            if (ch >= 0xDC00 && ch <= 0xDFFF) {
+                if (!pend_hs) return;           /* 迷子の下位サロゲートは捨てる */
+                cp = 0x10000 + ((pend_hs - 0xD800) << 10) + (ch - 0xDC00);
+                pend_hs = 0;
+            } else {
+                pend_hs = 0;
+            }
+            nb = u8_encode(cp, enc);
+            for (i = 0; i < rc; i++)
+                for (j = 0; j < nb; j++) q_push((unsigned char)enc[j]);
+        }
         return;
     }
     if (ir->EventType == MOUSE_EVENT) {
@@ -320,7 +454,9 @@ static int readbyte(int timeout_ms)
 
 /* ------------------------------------------------------- セルバッファ */
 
-typedef struct { char g[5]; unsigned char fg, bg, bold; } Cell;
+/* wide=1 のセルは全角グリフのリード。その右隣は g[0]==1 の継続セルで、
+ * flush_frame では出力されない (端末側でリードが 2 桁進むため)。 */
+typedef struct { char g[5]; unsigned char fg, bg, bold, wide; } Cell;
 
 static Cell *g_buf = NULL;
 static int   g_bw = 0, g_bh = 0;
@@ -335,15 +471,44 @@ static void buf_resize(void)
     if (!g_buf) { term_restore(); fprintf(stderr, "out of memory\n"); exit(1); }
 }
 
+/* セル (x,y) を上書きする前に、壊れる全角ペアの相方を空白へ戻す */
+static void cell_unpair(int x, int y)
+{
+    Cell *c = &g_buf[(size_t)y * (size_t)g_bw + (size_t)x];
+    if (c->g[0] == 1 && x > 0) {            /* 継続セル → リードを消す */
+        Cell *lead = c - 1;
+        if (lead->wide) { lead->g[0] = ' '; lead->g[1] = 0; lead->wide = 0; }
+    }
+    if (c->wide && x + 1 < g_bw) {          /* リード → 継続を消す */
+        Cell *cont = c + 1;
+        if (cont->g[0] == 1) { cont->g[0] = ' '; cont->g[1] = 0; }
+    }
+    c->wide = 0;
+}
+
 static void put(int x, int y, const char *glyph, int fg, int bg, int bold)
 {
-    Cell *c; size_t n;
+    Cell *c; size_t n; unsigned cp;
     if (x < 0 || y < 0 || x >= g_bw || y >= g_bh) return;
     c = &g_buf[(size_t)y * (size_t)g_bw + (size_t)x];
+    cell_unpair(x, y);
     n = strlen(glyph); if (n > 4) n = 4;
     memcpy(c->g, glyph, n); c->g[n] = 0;
     c->fg = (unsigned char)fg; c->bg = (unsigned char)bg;
     c->bold = (unsigned char)bold;
+    u8_decode(c->g, &cp);
+    if (cp_width(cp) == 2) {
+        if (x + 1 >= g_bw) {                /* 右端に全角は置けない */
+            c->g[0] = '?'; c->g[1] = 0;
+        } else {
+            Cell *cont;
+            cell_unpair(x + 1, y);
+            cont = c + 1;
+            cont->g[0] = 1; cont->g[1] = 0; /* 継続セル (sentinel) */
+            cont->fg = c->fg; cont->bg = c->bg; cont->bold = c->bold;
+            c->wide = 1;
+        }
+    }
 }
 
 static void putc_at(int x, int y, char ch, int fg, int bg, int bold)
@@ -357,9 +522,42 @@ static void putc_at(int x, int y, char ch, int fg, int bg, int bold)
 
 static void puts_at(int x, int y, const char *s, int fg, int bg, int bold)
 {
-    int i;
+    size_t i = 0;
     /* putc_at keeps application/config data from becoming control sequences. */
-    for (i = 0; s[i]; i++) putc_at(x + i, y, s[i], fg, bg, bold);
+    while (s[i]) {
+        unsigned cp; char g[5];
+        int n = u8_decode(s + i, &cp);
+        if (cp < 32 || cp == 127) {
+            putc_at(x, y, (char)cp, fg, bg, bold);
+            x += 1;
+        } else {
+            memcpy(g, s + i, (size_t)n); g[n] = 0;
+            put(x, y, g, fg, bg, bold);
+            x += cp_width(cp);
+        }
+        i += (size_t)n;
+    }
+}
+
+/* 先頭 nbytes を最大 maxw 桁だけ描く (全角は右端で打ち切り) */
+static void puts_at_clip(int x, int y, const char *s, size_t nbytes, int maxw,
+                         int fg, int bg, int bold)
+{
+    size_t i = 0; int col = 0;
+    while (i < nbytes && s[i]) {
+        unsigned cp; char g[5];
+        int n = u8_decode(s + i, &cp);
+        int cw = (cp < 32 || cp == 127) ? 1 : cp_width(cp);
+        if (col + cw > maxw) break;
+        if (cp < 32 || cp == 127) {
+            putc_at(x + col, y, (char)cp, fg, bg, bold);
+        } else {
+            memcpy(g, s + i, (size_t)n); g[n] = 0;
+            put(x + col, y, g, fg, bg, bold);
+        }
+        col += cw;
+        i += (size_t)n;
+    }
 }
 
 static void fill(int x, int y, int w, int h, const char *g, int fg, int bg, int bold)
@@ -383,6 +581,7 @@ static void flush_frame(void)
         o += (size_t)sprintf(out + o, "\x1b[%d;1H", y + 1);
         for (x = 0; x < g_bw; x++) {
             Cell *c = &g_buf[(size_t)y * (size_t)g_bw + (size_t)x];
+            if (c->g[0] == 1) continue;   /* 全角の継続セル: リードが 2 桁進めている */
             if (c->fg != lf || c->bg != lb || c->bold != lB) {
                 o += (size_t)sprintf(out + o, "\x1b[0;%d;%d%sm",
                                      30 + c->fg, 40 + c->bg, c->bold ? ";1" : "");
@@ -437,30 +636,70 @@ static void draw_shadow(int x, int y, int w, int h)
     for (i = 2; i < w + 2; i++) put(x + i, y + h, " ", C_BLACK, C_BLACK, 0);
 }
 
-/* 語単位の折返し。行数を返す。width<=0 では何もせず 1 を返す(防御) */
+/* 語単位の折返しコア (UTF-8 幅対応)。各出力行はソースの連続バイト範囲に
+ * なるので (開始, バイト長) を記録できる。starts==NULL なら数えるだけ。
+ * 行数を返す。width<=0 では 1 を返す (防御)。 */
+static int wrap_lines(const char *s, int width, size_t *starts, size_t *lens,
+                      int maxlines)
+{
+    int line = 0, col = 0;
+    size_t i = 0, lstart = 0, lend = 0;
+    if (width <= 0) return 1;
+#define WRAP_EMIT() do { \
+        if (starts && line < maxlines) { \
+            starts[line] = lstart; \
+            lens[line] = (lend > lstart) ? lend - lstart : 0; \
+        } } while (0)
+    while (s[i]) {
+        if (s[i] == '\n') {
+            WRAP_EMIT(); line++; i++;
+            lstart = i; lend = i; col = 0;
+            continue;
+        }
+        if (s[i] == ' ') {
+            if (col < width) { col++; lend = i + 1; }
+            i++;
+            continue;
+        }
+        {
+            int wwid = 0; size_t j = i;
+            while (s[j] && s[j] != ' ' && s[j] != '\n') {
+                unsigned cp; int n = u8_decode(s + j, &cp);
+                int cw = (cp < 32 || cp == 127) ? 1 : cp_width(cp);
+                if (wwid + cw > width) break;    /* 長大語はここで分割 */
+                wwid += cw; j += (size_t)n;
+            }
+            if (j == i) {                        /* width=1 に全角等: 1 文字捨て */
+                unsigned cp;
+                i += (size_t)u8_decode(s + i, &cp);
+                continue;
+            }
+            if (col + wwid > width) {
+                WRAP_EMIT(); line++;
+                lstart = i; col = 0;
+            }
+            col += wwid; i = j; lend = i;
+        }
+    }
+    WRAP_EMIT(); line++;
+#undef WRAP_EMIT
+    return line;
+}
+
+/* 語単位の折返し。行数を返す。draw なら (x,y) を左上に描画する。 */
 static int wrap_text(const char *s, int width, int x, int y, int draw,
                      int fg, int bg, int bold)
 {
-    int lines = 0, col = 0, i = 0;
-    if (width <= 0) return 1;
-    while (s[i]) {
-        int wlen = 0, j = i;
-        if (s[i] == '\n') { lines++; col = 0; i++; continue; }
-        while (s[j] && s[j] != ' ' && s[j] != '\n') { wlen++; j++; }
-        if (wlen > width) wlen = width;
-        if (col + wlen > width) { lines++; col = 0; }
-        if (draw && wlen > 0) {
-            int k;
-            for (k = 0; k < wlen; k++)
-                putc_at(x + col + k, y + lines, s[i + k], fg, bg, bold);
-        }
-        col += wlen; i += wlen;
-        while (s[i] == ' ') {
-            if (col < width) { if (draw) putc_at(x + col, y + lines, ' ', fg, bg, bold); col++; }
-            i++;
-        }
+    if (!draw)
+        return wrap_lines(s, width, NULL, NULL, 0);
+    {
+        size_t st[128], ln[128];
+        int total = wrap_lines(s, width, st, ln, 128);
+        int i, shown = total < 128 ? total : 128;
+        for (i = 0; i < shown; i++)
+            puts_at_clip(x, y + i, s + st[i], ln[i], width, fg, bg, bold);
+        return total;
     }
-    return lines + 1;
 }
 
 /* ------------------------------------------------------------ 入力 */
@@ -524,8 +763,8 @@ static Key getkey(void)
                                     break;
                                 break;
                             }
-                            if (pn < PASTE_MAX - 1 && pc >= 32 && pc < 127)
-                                g_paste[pn++] = (char)pc;
+                            if (pn < PASTE_MAX - 1 && pc >= 32 && pc != 127)
+                                g_paste[pn++] = (char)pc;   /* UTF-8 バイトも通す */
                         }
                         g_paste[pn] = 0;
                         k.type = K_PASTE; return k;
@@ -558,6 +797,23 @@ static Key getkey(void)
         if (c == '\t')              { k.type = K_TAB;   return k; }
         if (c == 127 || c == 8)     { k.type = K_BS;    return k; }
         if (c == 3)                 { k.type = K_QUIT;  return k; }
+        if (c >= 0xC2 && c <= 0xF4) {         /* UTF-8 リード: 1 文字組み立て */
+            char seq[5];
+            int need, gi, ok = 1;
+            unsigned cp;
+            seq[0] = (char)c;
+            need = (c >= 0xF0) ? 3 : (c >= 0xE0) ? 2 : 1;
+            for (gi = 0; gi < need; gi++) {
+                int cc = readbyte(60);
+                if (cc < 0x80 || cc > 0xBF) { ok = 0; break; }
+                seq[gi + 1] = (char)cc;
+            }
+            if (!ok) continue;
+            seq[need + 1] = 0;
+            u8_decode(seq, &cp);
+            if (cp >= 32 && cp != 0xFFFD) { k.type = K_CHAR; k.cp = cp; return k; }
+            continue;
+        }
         k.type = c; return k;
     }
 }
@@ -584,7 +840,7 @@ static int item_enterable(const UtItem *it)
 
 static int item_text(const UtItem *it, char *buf, size_t cap)
 {
-    char mark[16] = "    ";
+    char mark[48] = "    ";
     char tail[8]  = "";
     int off;
     switch (it->type) {
@@ -598,9 +854,12 @@ static int item_text(const UtItem *it, char *buf, size_t cap)
         else if (it->value == 1) strcpy(mark, "<M> ");
         else                     strcpy(mark, "< > ");
         break;
-    case UT_TYPE_STR: case UT_TYPE_INT:
-        snprintf(mark, sizeof mark, "(%.10s) ", it->strval);
+    case UT_TYPE_STR: case UT_TYPE_INT: {
+        char prev[41];                       /* 10 桁ぶん (UTF-8 で最大 40B) */
+        u8_prefix(prev, sizeof prev, it->strval, 10);
+        snprintf(mark, sizeof mark, "(%s) ", prev);
         break;
+    }
     case UT_TYPE_RADIO:
         strcpy(mark, (it->parent && it->parent->value == it->idx) ? "(X) " : "( ) ");
         break;
@@ -700,7 +959,7 @@ static void draw_backdrop(void)
 
 static void draw_title(int x, int y, int w, const char *title)
 {
-    int len = (int)strlen(title);
+    int len = u8_swidth(title);
     int tx = x + (w - len - 2) / 2;
     if (tx < x + 1) tx = x + 1;
     putc_at(tx, y, ' ', C_BLUE, C_WHITE, 1);
@@ -711,22 +970,36 @@ static void draw_title(int x, int y, int w, const char *title)
 static void draw_buttons(int y, int cx, const char *const *labels, int n, int focus)
 {
     int total = 0, i, x;
-    for (i = 0; i < n; i++) total += (int)strlen(labels[i]) + 2;
+    for (i = 0; i < n; i++) total += u8_swidth(labels[i]) + 2;
     total -= 2;
     x = cx - total / 2;
     g_btn_y = y; g_btn_n = n;
     for (i = 0; i < n; i++) {
         const char *lb = labels[i];
-        int len = (int)strlen(lb), j, hot = -1;
+        int len = u8_swidth(lb), hot = -1;
         int ac = (i == focus);
         int fg = ac ? C_WHITE : C_BLACK, bg = ac ? C_BLUE : C_WHITE;
+        size_t bi = 0; int col = 0;
+        {
+            size_t j;
+            for (j = 0; lb[j]; j++)
+                if (lb[j] >= 'A' && lb[j] <= 'Z') { hot = (int)j; break; }
+        }
         g_btn_x[i] = x; g_btn_w[i] = len;
-        for (j = 0; lb[j]; j++)
-            if (isupper((unsigned char)lb[j])) { hot = j; break; }
-        for (j = 0; j < len; j++) {
+        while (lb[bi]) {
+            unsigned cp; char g[5];
+            int nb = u8_decode(lb + bi, &cp);
             int f = fg, b = ac;
-            if (j == hot) { f = ac ? C_YELLOW : C_RED; b = 1; }
-            putc_at(x + j, y, lb[j], f, bg, b);
+            if ((int)bi == hot) { f = ac ? C_YELLOW : C_RED; b = 1; }
+            if (cp < 32 || cp == 127) {
+                putc_at(x + col, y, '?', f, bg, b);
+                col += 1;
+            } else {
+                memcpy(g, lb + bi, (size_t)nb); g[nb] = 0;
+                put(x + col, y, g, f, bg, b);
+                col += cp_width(cp);
+            }
+            bi += (size_t)nb;
         }
         x += len + 2;
     }
@@ -762,7 +1035,8 @@ static void draw_menu(void)
     draw_box(dx, dy, dw, dh, C_WHITE);
     draw_title(dx, dy, dw, g_depth ? m->name : g_app->title);
 
-    ilines = wrap_text(INSTR, dw - 4, dx + 2, dy + 1, 1, C_BLACK, C_WHITE, 0);
+    ilines = wrap_text(g_app->instructions ? g_app->instructions : INSTR,
+                       dw - 4, dx + 2, dy + 1, 1, C_BLACK, C_WHITE, 0);
 
     mby = dy + 1 + ilines;
     mbh = (dy + dh - 4) - mby + 1;
@@ -783,15 +1057,25 @@ static void draw_menu(void)
 
     for (i = 0; i < lh && fr->top + i < m->nchild; i++) {
         UtItem *it = &m->children[fr->top + i];
-        int off = item_text(it, buf, sizeof buf);
+        int off = item_text(it, buf, sizeof buf);   /* マーク部のバイト長 (ASCII) */
         int selr = (fr->top + i == fr->sel);
-        int len = (int)strlen(buf), j;
-        if (len > g_list_w - 1) { len = g_list_w - 1; buf[len] = 0; }
-        for (j = 0; j < len; j++) {
+        size_t bi = 0; int col = 0;
+        while (buf[bi] && col < g_list_w - 1) {
+            unsigned cp; char g[5];
+            int nb = u8_decode(buf + bi, &cp);
+            int cw = (cp < 32 || cp == 127) ? 1 : cp_width(cp);
             int fg = C_BLACK, bg = C_WHITE, bold = 0;
-            if (j >= off && selr) { fg = C_WHITE; bg = C_BLUE; bold = 1; }
-            if (j == off && it->type != UT_TYPE_COMMENT) { fg = selr ? C_YELLOW : C_BLUE; bold = 1; }
-            putc_at(g_list_x + 1 + j, g_list_y + i, buf[j], fg, bg, bold);
+            if ((int)bi >= off && selr) { fg = C_WHITE; bg = C_BLUE; bold = 1; }
+            if ((int)bi == off && it->type != UT_TYPE_COMMENT) { fg = selr ? C_YELLOW : C_BLUE; bold = 1; }
+            if (col + cw > g_list_w - 1) break;     /* 右端に全角が半掛かりなら打切り */
+            if (cp < 32 || cp == 127) {
+                putc_at(g_list_x + 1 + col, g_list_y + i, '?', fg, bg, bold);
+            } else {
+                memcpy(g, buf + bi, (size_t)nb); g[nb] = 0;
+                put(g_list_x + 1 + col, g_list_y + i, g, fg, bg, bold);
+            }
+            col += cw;
+            bi += (size_t)nb;
         }
     }
     if (fr->top > 0) puts_at(dx + 4, mby, "^(-)", C_BLACK, C_WHITE, 0);
@@ -835,7 +1119,7 @@ static void msgbox(const char *title, const char *text)
         int w, h, x, y, tl;
         Key k;
         draw_menu();
-        tl = (int)strlen(text);
+        tl = u8_swidth(text);
         w = clampw(tl + 8);
         h = wrap_text(text, w - 4, 0, 0, 0, 0, 0, 0) + 5;
         modal_frame(&x, &y, w, h, title);
@@ -878,13 +1162,31 @@ static int yesno(const char *title, const char *text)
     }
 }
 
+/* カーソル位置 *cur (バイト境界) にコードポイントを 1 つ挿入する */
+static void ib_insert(char *val, size_t cap, size_t *cur, unsigned cp,
+                      int digits_only)
+{
+    char enc[4];
+    int n;
+    size_t len = strlen(val);
+    if (cp < 32 || cp == 127) return;
+    if (digits_only && !(cp >= '0' && cp <= '9')) return;
+    n = u8_encode(cp, enc);
+    if (len + (size_t)n >= cap) return;
+    memmove(val + *cur + (size_t)n, val + *cur, len - *cur + 1);
+    memcpy(val + *cur, enc, (size_t)n);
+    *cur += (size_t)n;
+}
+
 static int inputbox(const char *title, const char *prompt, char *val,
                     size_t cap, int digits_only)
 {
     static const char *B[2] = { "<  Ok  >", "< Help >" };
-    int focus = 0, cur = (int)strlen(val), off = 0;
+    int focus = 0;
+    size_t cur = strlen(val), off = 0;
     for (;;) {
-        int w, h, x, y, fw, i, len;
+        int w, h, x, y, fw, i;
+        size_t len;
         Key k;
         draw_menu();
         w = clampw(66);
@@ -892,16 +1194,18 @@ static int inputbox(const char *title, const char *prompt, char *val,
         modal_frame(&x, &y, w, h, title);
         wrap_text(prompt, w - 4, x + 2, y + 2, 1, C_BLACK, C_WHITE, 0);
         fw = w - 8; if (fw < 1) fw = 1;
-        len = (int)strlen(val);
+        len = strlen(val);
+        if (cur > len) cur = len;
         if (cur < off) off = cur;
-        if (cur - off >= fw) off = cur - fw + 1;
+        /* カーソルがフィールド右端からはみ出す間、off を 1 文字ずつ進める */
+        while (off < cur && u8_swidth_n(val + off, cur - off) >= fw)
+            off = u8_next(val, off);
         draw_box(x + 3, y + h - 6, w - 6, 3, C_WHITE);
-        for (i = 0; i < fw; i++) {
-            char ch = (off + i < len) ? val[off + i] : ' ';
-            putc_at(x + 4 + i, y + h - 5, ch, C_WHITE, C_BLUE, 1);
-        }
+        for (i = 0; i < fw; i++)
+            putc_at(x + 4 + i, y + h - 5, ' ', C_WHITE, C_BLUE, 1);
+        puts_at_clip(x + 4, y + h - 5, val + off, len - off, fw, C_WHITE, C_BLUE, 1);
         draw_buttons(y + h - 2, x + w / 2, B, 2, focus);
-        g_cursx = x + 4 + (cur - off); g_cursy = y + h - 5;
+        g_cursx = x + 4 + u8_swidth_n(val + off, cur - off); g_cursy = y + h - 5;
         flush_frame();
         g_cursx = g_cursy = -1;
         k = getkey();
@@ -914,26 +1218,36 @@ static int inputbox(const char *title, const char *prompt, char *val,
             return 0;
         case K_ESC: case K_QUIT: return -1;
         case K_TAB: case K_BTAB: focus = !focus; break;
-        case K_LEFT:  if (cur > 0) cur--; break;
-        case K_RIGHT: if (cur < len) cur++; break;
-        case K_HOME:  cur = 0; break;
+        case K_LEFT:  if (cur > 0) cur = u8_prev(val, cur); break;
+        case K_RIGHT: if (cur < len) cur = u8_next(val, cur); break;
+        case K_HOME:  cur = 0; off = 0; break;
         case K_END:   cur = len; break;
         case K_BS:
-            if (cur > 0) { memmove(val + cur - 1, val + cur, (size_t)(len - cur) + 1); cur--; }
+            if (cur > 0) {
+                size_t p = u8_prev(val, cur);
+                memmove(val + p, val + cur, len - cur + 1);
+                cur = p;
+            }
             break;
         case K_DEL:
-            if (cur < len) memmove(val + cur, val + cur + 1, (size_t)(len - cur));
+            if (cur < len) {
+                size_t nx = u8_next(val, cur);
+                memmove(val + cur, val + nx, len - nx + 1);
+            }
             break;
         case K_PASTE: {
-            const char *pp;
-            for (pp = g_paste; *pp; pp++) {
-                if (digits_only && !isdigit((unsigned char)*pp)) continue;
-                if ((size_t)len + 1 >= cap) break;
-                memmove(val + cur + 1, val + cur, (size_t)(len - cur) + 1);
-                val[cur++] = *pp; len++;
+            size_t pp = 0;
+            while (g_paste[pp]) {
+                unsigned cp;
+                int n = u8_decode(g_paste + pp, &cp);
+                ib_insert(val, cap, &cur, cp, digits_only);
+                pp += (size_t)n;
             }
             break;
         }
+        case K_CHAR:
+            ib_insert(val, cap, &cur, k.cp, digits_only);
+            break;
         case K_MOUSE:
             if (k.mpress) {
                 int b = hit_button(k.mx, k.my);
@@ -942,11 +1256,8 @@ static int inputbox(const char *title, const char *prompt, char *val,
             }
             break;
         default:
-            if (k.type >= 32 && k.type < 127 && (size_t)len + 1 < cap) {
-                if (digits_only && !isdigit(k.type)) break;
-                memmove(val + cur + 1, val + cur, (size_t)(len - cur) + 1);
-                val[cur] = (char)k.type; cur++;
-            }
+            if (k.type >= 32 && k.type < 127)
+                ib_insert(val, cap, &cur, (unsigned)k.type, digits_only);
             break;
         }
     }
@@ -969,30 +1280,18 @@ static int textview(const char *title, const char *text, int njump)
         if (top < 0) top = 0;
         modal_frame(&x, &y, w, h, title);
         {
-            static char *lines = NULL; static size_t lcap = 0;
-            size_t need = (size_t)(total + 1) * (size_t)w;
-            if (need > lcap) { free(lines); lines = malloc(need); lcap = need; }
-            if (lines) {
-                int li = 0, col = 0; size_t ii = 0;
-                memset(lines, ' ', need);
-                while (text[ii]) {
-                    int wl = 0; size_t jj = ii;
-                    if (text[ii] == '\n') { li++; col = 0; ii++; continue; }
-                    while (text[jj] && text[jj] != ' ' && text[jj] != '\n') { wl++; jj++; }
-                    if (wl > w - 4) wl = w - 4;
-                    if (col + wl > w - 4) { li++; col = 0; }
-                    if (wl > 0 && li <= total)
-                        memcpy(lines + (size_t)li * (size_t)w + (size_t)col, text + ii, (size_t)wl);
-                    col += wl; ii += (size_t)wl;
-                    while (text[ii] == ' ') { if (col < w - 4) col++; ii++; }
-                }
-                for (i = 0; i < vh && top + i < total; i++) {
-                    int cx2;
-                    for (cx2 = 0; cx2 < w - 4; cx2++)
-                        putc_at(x + 2 + cx2, y + 1 + i,
-                                lines[(size_t)(top + i) * (size_t)w + (size_t)cx2],
-                                C_BLACK, C_WHITE, 0);
-                }
+            static size_t *lst = NULL, *lln = NULL; static int lcap = 0;
+            if (total > lcap) {
+                free(lst); free(lln);
+                lst = malloc((size_t)total * sizeof *lst);
+                lln = malloc((size_t)total * sizeof *lln);
+                lcap = (lst && lln) ? total : 0;
+            }
+            if (lcap >= total) {
+                wrap_lines(text, w - 4, lst, lln, total);
+                for (i = 0; i < vh && top + i < total; i++)
+                    puts_at_clip(x + 2, y + 1 + i, text + lst[top + i],
+                                 lln[top + i], w - 4, C_BLACK, C_WHITE, 0);
             }
         }
         pct = total <= vh ? 100 : (top + vh) * 100 / total;
@@ -1026,6 +1325,22 @@ static int textview(const char *title, const char *text, int njump)
 }
 
 /* ------------------------------------------------------ 保存/読込 */
+
+/* UTF-8 パス対応の fopen: Windows の fopen は ANSI コードページ解釈なので
+ * UTF-16 へ変換して _wfopen する。POSIX はそのまま fopen (UTF-8 前提)。 */
+static FILE *cfg_fopen(const char *path, const char *mode)
+{
+#if defined(_WIN32)
+    wchar_t wpath[1024], wmode[8];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) == 0)
+        return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, 8) == 0)
+        return NULL;
+    return _wfopen(wpath, wmode);
+#else
+    return fopen(path, mode);
+#endif
+}
 
 /* オンディスクのシンボル名 "PREFIX_SYM"、prefix 空なら "SYM" */
 static void sym_name(char *buf, size_t n, const char *sym)
@@ -1136,7 +1451,7 @@ static void save_walk(FILE *f, UtItem *m)
 
 static int save_config(const char *path)
 {
-    FILE *f = fopen(path, "w");
+    FILE *f = cfg_fopen(path, "w");
     if (!f) return -1;
     fprintf(f, "#\n# Automatically generated file; DO NOT EDIT.\n# %s\n#\n", g_app->title);
     save_walk(f, g_root_ptr);
@@ -1228,12 +1543,13 @@ static int decimal_value(const char *s)
 
 static int load_config(const char *path)
 {
-    char line[512];
-    FILE *f = fopen(path, "r");
+    /* strval 511 バイトが全てエスケープされても収まる行バッファ */
+    char line[2048];
+    FILE *f = cfg_fopen(path, "r");
     if (!f) return -1;
     reset_walk(g_root_ptr);
     while (fgets(line, sizeof line, f)) {
-        char sym[160], val[256];
+        char sym[160], val[1600];
         const char *bare;
         UtItem *it;
         int n = -1;
@@ -1245,7 +1561,7 @@ static int load_config(const char *path)
                 it->value = 0;
             continue;
         }
-        if (sscanf(line, "CONFIG_%159[A-Za-z0-9_]=%255[^\r\n]", sym, val) == 2) {
+        if (sscanf(line, "CONFIG_%159[A-Za-z0-9_]=%1599[^\r\n]", sym, val) == 2) {
             bare = strip_prefix(sym);
             it = bare ? find_sym(g_root_ptr, bare) : NULL;
             if (!it) continue;
@@ -1441,7 +1757,7 @@ static int exit_flow(void)
 
 static void save_as(void)
 {
-    static char fn[128];
+    static char fn[512];
     if (!fn[0]) snprintf(fn, sizeof fn, "%s", g_app->config_file);
     if (inputbox("Save Configuration",
         "Enter a filename to which this configuration should be saved.  "
@@ -1455,7 +1771,7 @@ static void save_as(void)
 }
 static void load_as(void)
 {
-    static char fn[128];
+    static char fn[512];
     if (!fn[0]) snprintf(fn, sizeof fn, "%s", g_app->config_file);
     if (inputbox("Load Configuration",
         "Enter the name of the configuration file to load.  Accept the name "
@@ -1573,6 +1889,7 @@ static void main_loop(void)
         case K_QUIT: return;
         case K_RESIZE: break;                    /* getkey が既に反映済 */
         case K_PASTE: break;                     /* メニューではペースト無視 */
+        case K_CHAR: break;                      /* 非 ASCII 文字はメニューでは無視 */
         case K_UP:   fr->sel = next_sel(m, fr->sel, -1); break;
         case K_DOWN: fr->sel = next_sel(m, fr->sel, +1); break;
         case K_PGUP: { int i; for (i = 0; i < g_list_h - 1; i++) fr->sel = next_sel(m, fr->sel, -1); } break;

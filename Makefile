@@ -29,8 +29,10 @@ test: demo
 	python3 tests/test_demo.py ./demo
 	$(CC) $(CFLAGS) -I. -o test-config tests/test_config.c utui.c
 	./test-config
+	$(CC) $(CFLAGS) -I. -o test-utf8 tests/test_utf8.c
+	./test-utf8
 
 clean:
-	rm -f *.o *.a demo demo-asan demo.exe test-config test.config
+	rm -f *.o *.a demo demo-asan demo.exe test-config test-utf8 test.config
 
 .PHONY: all windows asan test clean
