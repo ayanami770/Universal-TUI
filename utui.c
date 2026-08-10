@@ -1326,6 +1326,22 @@ static int textview(const char *title, const char *text, int njump)
 
 /* ------------------------------------------------------ 保存/読込 */
 
+/* UTF-8 パス対応の fopen: Windows の fopen は ANSI コードページ解釈なので
+ * UTF-16 へ変換して _wfopen する。POSIX はそのまま fopen (UTF-8 前提)。 */
+static FILE *cfg_fopen(const char *path, const char *mode)
+{
+#if defined(_WIN32)
+    wchar_t wpath[1024], wmode[8];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) == 0)
+        return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, 8) == 0)
+        return NULL;
+    return _wfopen(wpath, wmode);
+#else
+    return fopen(path, mode);
+#endif
+}
+
 /* オンディスクのシンボル名 "PREFIX_SYM"、prefix 空なら "SYM" */
 static void sym_name(char *buf, size_t n, const char *sym)
 {
@@ -1435,7 +1451,7 @@ static void save_walk(FILE *f, UtItem *m)
 
 static int save_config(const char *path)
 {
-    FILE *f = fopen(path, "w");
+    FILE *f = cfg_fopen(path, "w");
     if (!f) return -1;
     fprintf(f, "#\n# Automatically generated file; DO NOT EDIT.\n# %s\n#\n", g_app->title);
     save_walk(f, g_root_ptr);
@@ -1529,7 +1545,7 @@ static int load_config(const char *path)
 {
     /* strval 511 バイトが全てエスケープされても収まる行バッファ */
     char line[2048];
-    FILE *f = fopen(path, "r");
+    FILE *f = cfg_fopen(path, "r");
     if (!f) return -1;
     reset_walk(g_root_ptr);
     while (fgets(line, sizeof line, f)) {
