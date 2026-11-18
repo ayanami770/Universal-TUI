@@ -32,7 +32,7 @@ static UtItem kids[] = {
 };
 static UtItem root = UT_ROOT("Embedded Test", kids);
 static UtApp app = { "embed test", "Embedded Test", "test-embed.config", "EMB",
-                     NULL, "test-embed", NULL, 0 };
+                     NULL, "test-embed", NULL, 0, 0, 0 };
 
 typedef struct { int fd; int result; volatile int done; } Run;
 
@@ -175,6 +175,39 @@ int main(void)
     wait_done(&r, 3000);
     pthread_join(th, NULL);
     close(s); close(m);
+
+    /* --- 6. a narrow terminal (UtApp.min_cols) and the blurb (instructions_min_rows) --- */
+    {
+        static const struct { int mc, imr, cols, rows; const char *name; int fits, instr; const char *need; } T[] = {
+            {  0,   0, 60, 30, "the default still needs 80 columns",          0, 0, "by 80 columns" },
+            { 52,   0, 52, 30, "min_cols 52 lays the menu out in 52 columns", 1, 1, NULL },
+            { 52,   0, 51, 30, "one column narrower is too small",            0, 0, "by 52 columns" },
+            { 30,   0, 51, 30, "a min_cols under the floor is the floor",     0, 0, "by 52 columns" },
+            { 52,  30, 52, 24, "the blurb is left out below its rows",        1, 0, NULL },
+            { 52,  30, 52, 30, "the blurb is drawn from its rows",            1, 1, NULL },
+            { 52,  -1, 52, 40, "a negative instructions_min_rows: never",     1, 0, NULL },
+        };
+        size_t i;
+        for (i = 0; i < sizeof T / sizeof T[0]; i++) {
+            int ok;
+            app.min_cols = T[i].mc; app.instructions_min_rows = T[i].imr;
+            m = open_pty(&s, T[i].cols, T[i].rows);
+            r.fd = s; r.result = -9; r.done = 0;
+            pthread_create(&th, NULL, runner, &r);
+            n = slurp(m, buf, sizeof buf, 0, 500);
+            if (T[i].fits)
+                ok = !contains(buf, n, "too small") && contains(buf, n, "elect>") && contains(buf, n, "oad >") &&
+                     contains(buf, n, "eature one") && (contains(buf, n, "Arrow keys") == T[i].instr);
+            else
+                ok = contains(buf, n, "too small") && contains(buf, n, T[i].need);
+            CK(T[i].name, ok);
+            ut_request_quit();
+            wait_done(&r, 3000);
+            pthread_join(th, NULL);
+            close(s); close(m);
+        }
+        app.min_cols = 0; app.instructions_min_rows = 0;
+    }
 
     /* --- 5. not a terminal: refused --- */
     {
