@@ -1229,7 +1229,9 @@ static int inputbox(const char *title, const char *prompt, char *val,
         Key k;
         draw_menu();
         w = clampw(66);
-        h = 11;
+        /* the prompt above the field: 3 lines at 66 columns, more on a narrow terminal (UtApp.min_cols) */
+        h = wrap_text(prompt, w - 4, 0, 0, 0, 0, 0, 0);
+        h = (h < 3 ? 3 : h) + 8;
         modal_frame(&x, &y, w, h, title);
         wrap_text(prompt, w - 4, x + 2, y + 2, 1, C_BLACK, C_WHITE, 0);
         fw = w - 8; if (fw < 1) fw = 1;

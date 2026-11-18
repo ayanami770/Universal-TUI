@@ -5,3 +5,6 @@ demo-asan
 demo.exe
 *.config
 *.render.png
+test-config
+test-embed
+test-utf8

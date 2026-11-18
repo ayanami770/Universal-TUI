@@ -29,6 +29,7 @@ static int fails = 0;
 static UtItem kids[] = {
     UT_BOOL(2, "Feature one", "ONE", "help one"),
     UT_STR("A string", "NAME", "embedded", NULL),
+    UT_INT("A number", "NUM", "7", NULL),
 };
 static UtItem root = UT_ROOT("Embedded Test", kids);
 static UtApp app = { "embed test", "Embedded Test", "test-embed.config", "EMB",
@@ -206,6 +207,21 @@ int main(void)
             pthread_join(th, NULL);
             close(s); close(m);
         }
+        /* the number's input box: its prompt (the engine's longest) wraps to 4 lines at 52 columns, and the
+         * field goes below them instead of over the last one */
+        app.min_cols = 52;
+        m = open_pty(&s, 52, 30);
+        r.fd = s; r.result = -9; r.done = 0;
+        pthread_create(&th, NULL, runner, &r);
+        slurp(m, buf, sizeof buf, 0, 400);
+        if (write(m, "\x1b[B\x1b[B\r", 7) != 7) fails++;
+        n = slurp(m, buf, sizeof buf, 0, 500);
+        CK("a narrow input box shows its whole prompt above the field",
+           contains(buf, n, "Fractions") && contains(buf, n, "below it."));
+        ut_request_quit();
+        wait_done(&r, 3000);
+        pthread_join(th, NULL);
+        close(s); close(m);
         app.min_cols = 0; app.instructions_min_rows = 0;
     }
 
