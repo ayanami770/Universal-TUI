@@ -101,7 +101,23 @@ int ut_run (UtItem *root, const UtApp *app);                 /* 1=saved 0=not -1
 int ut_main(UtItem *root, UtApp  *app, int argc, char **argv);/* CLI wrapper -> exit code */
 int ut_load(UtItem *root, const UtApp *app, const char *path);/* headless load, 0 ok      */
 int ut_save(UtItem *root, const UtApp *app, const char *path);/* headless save, 0 ok      */
+
+/* Embedding (POSIX): run on a terminal the host provides, e.g. a pty's slave. */
+int  ut_run_fd(UtItem *root, const UtApp *app, int in_fd, int out_fd); /* as ut_run   */
+void ut_notify_resize(void);  /* the host's terminal changed size (any thread)          */
+void ut_request_quit(void);   /* end the run without saving (any thread)                */
 ```
+
+### Embedding in a host without a terminal
+
+An app that draws its own terminal view (for example over a pseudo-terminal it
+opened with `posix_openpt`) runs the engine on the pty's slave with
+`ut_run_fd()`, usually on a thread of its own. In this mode the engine installs no
+signal handlers and no `atexit` hook, so it never takes over the process: the host
+sets the pty's size (`TIOCSWINSZ` on the master) and calls `ut_notify_resize()`,
+and ends a run with `ut_request_quit()` or by closing the master — a hung-up
+terminal reads as a quit without saving, never as a busy loop. The engine's state
+is global, so one run at a time. Not available on Windows (returns -1).
 
 `.config` format: `CONFIG_<prefix>_<SYM>=y|m|"str"|int` and
 `# CONFIG_<prefix>_<SYM> is not set`, matching Linux Kconfig. With an empty
@@ -113,7 +129,7 @@ int ut_save(UtItem *root, const UtApp *app, const char *path);/* headless save, 
 make            # libutui.a + demo
 make windows    # demo.exe (MinGW cross)
 make asan       # demo-asan (ASan/UBSan)
-make test       # python3 tests/test_demo.py ./demo
+make test       # pty suite (tests/test_demo.py), config/UTF-8 tests, embedding test
 ```
 
 The engine builds warning-clean under `gcc`/`clang -std=c99 -Wall -Wextra
@@ -124,6 +140,8 @@ ASan/UBSan.
 
 - [photo-to-dom](https://github.com/ayanami770/photo-to-dom) embeds this as a
   submodule to provide `photo2dom-menuconfig`.
+- [certwatch](https://github.com/ayanami770/certwatch) runs it inside its Android
+  app, on a pseudo-terminal the app draws itself (`ut_run_fd`).
 
 ## License
 
