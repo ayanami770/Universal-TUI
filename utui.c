@@ -190,6 +190,12 @@ static void u8_prefix(char *dst, size_t cap, const char *src, int maxw)
 
 static volatile sig_atomic_t g_quit = 0, g_resized = 0;
 
+#if !defined(_WIN32)
+/* The terminal's fds: stdin/stdout, or the host's (ut_run_fd). Embedded: no signal handlers, no atexit hook. */
+static int g_in_fd = STDIN_FILENO, g_out_fd = STDOUT_FILENO;
+static int g_embedded = 0;
+#endif
+
 /* --- 生バイト出力 (部分書き込みに強い) --- */
 static void wrs_n(const char *s, size_t n)
 {
@@ -204,7 +210,7 @@ static void wrs_n(const char *s, size_t n)
 #else
     size_t off = 0;
     while (off < n) {
-        long w = (long)write(STDOUT_FILENO, s + off, n - off);
+        long w = (long)write(g_out_fd, s + off, n - off);
         if (w < 0) { if (errno == EINTR) continue; return; }
         off += (size_t)w;
     }
@@ -392,7 +398,7 @@ static int g_rawon = 0;
 static void term_getsize(void)
 {
     struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
+    if (ioctl(g_out_fd, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0) {
         g_cols = ws.ws_col; g_rows = ws.ws_row;
     }
 }
@@ -402,7 +408,7 @@ static void term_restore(void)
     if (!g_rawon) return;
     g_rawon = 0;
     wrs("\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[0m\x1b[?25h\x1b[?1049l");
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_oldtio);
+    tcsetattr(g_in_fd, TCSAFLUSH, &g_oldtio);
 }
 
 static void on_sigint(int s)   { (void)s; g_quit = 1; }
@@ -412,14 +418,24 @@ static void term_init(void)
 {
     struct termios t;
     struct sigaction sa;
-    tcgetattr(STDIN_FILENO, &g_oldtio);
+    tcgetattr(g_in_fd, &g_oldtio);
     t = g_oldtio;
     t.c_lflag &= (tcflag_t)~(ICANON | ECHO);
     t.c_iflag &= (tcflag_t)~(IXON | ICRNL | INLCR);
     t.c_cc[VMIN] = 1; t.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &t);
+    tcsetattr(g_in_fd, TCSAFLUSH, &t);
     g_rawon = 1;
-    atexit(term_restore);
+    if (g_embedded) {
+        /* The host owns the process: it reports resizes (ut_notify_resize) and ends a
+         * run by hanging the terminal up or by ut_request_quit. */
+        wrs("\x1b[?1049h\x1b[2J\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[?2004h");
+        term_getsize();
+        return;
+    }
+    {
+        static int hooked = 0;                     /* one atexit hook for every run */
+        if (!hooked) { hooked = 1; atexit(term_restore); }
+    }
 
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_sigint;                     /* SA_RESTART なし */
@@ -437,17 +453,20 @@ static void term_init(void)
 static int readbyte(int timeout_ms)
 {
     struct pollfd p; unsigned char c; long n; int r;
-    p.fd = STDIN_FILENO; p.events = POLLIN; p.revents = 0;
+    p.fd = g_in_fd; p.events = POLLIN; p.revents = 0;
     for (;;) {
         if (g_quit)    return -3;
         if (g_resized) return -2;
         r = poll(&p, 1, timeout_ms);
         if (r < 0) { if (errno == EINTR) continue; return -1; }
         if (r == 0) return -1;
-        n = (long)read(STDIN_FILENO, &c, 1);
+        n = (long)read(g_in_fd, &c, 1);
         if (n == 1) return (int)c;
-        if (n < 0 && errno == EINTR) continue;
-        return -1;
+        if (n < 0 && (errno == EINTR || errno == EAGAIN)) continue;
+        /* End of file or a hung-up terminal (a pty whose master closed reads EIO): there
+         * will be no more input, so quit instead of polling a dead fd for ever. */
+        g_quit = 1;
+        return -3;
     }
 }
 #endif
@@ -1935,7 +1954,7 @@ static void main_loop(void)
 /* ---------------------------------------------------- 公開 API */
 
 #if !defined(_WIN32)
-static int stdio_is_tty(void) { return isatty(STDIN_FILENO) && isatty(STDOUT_FILENO); }
+static int stdio_is_tty(void) { return isatty(g_in_fd) && isatty(g_out_fd); }
 #else
 static int stdio_is_tty(void)
 {
@@ -1989,6 +2008,25 @@ int ut_run(UtItem *root, const UtApp *app)
     term_restore();
     return g_saved_on_exit;
 }
+
+int ut_run_fd(UtItem *root, const UtApp *app, int in_fd, int out_fd)
+{
+#if defined(_WIN32)
+    (void)root; (void)app; (void)in_fd; (void)out_fd;
+    return -1;
+#else
+    int r;
+    if (in_fd < 0 || out_fd < 0 || !isatty(in_fd) || !isatty(out_fd)) return -1;
+    g_in_fd = in_fd; g_out_fd = out_fd; g_embedded = 1;
+    g_quit = 0; g_resized = 0;
+    r = ut_run(root, app);
+    g_in_fd = STDIN_FILENO; g_out_fd = STDOUT_FILENO; g_embedded = 0;
+    return r;
+#endif
+}
+
+void ut_notify_resize(void) { g_resized = 1; }
+void ut_request_quit(void)  { g_quit = 1; }
 
 int ut_main(UtItem *root, UtApp *app, int argc, char **argv)
 {

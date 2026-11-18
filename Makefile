@@ -31,8 +31,10 @@ test: demo
 	./test-config
 	$(CC) $(CFLAGS) -I. -o test-utf8 tests/test_utf8.c
 	./test-utf8
+	$(CC) $(CFLAGS) -pthread -I. -o test-embed tests/test_embed.c utui.c
+	./test-embed
 
 clean:
-	rm -f *.o *.a demo demo-asan demo.exe test-config test-utf8 test.config
+	rm -f *.o *.a demo demo-asan demo.exe test-config test-utf8 test-embed test.config test-embed.config
 
 .PHONY: all windows asan test clean

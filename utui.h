@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define UTUI_VERSION "1.1"
+#define UTUI_VERSION "1.2"
 
 /* Item kinds (stored in UtItem.type). */
 enum {
@@ -85,6 +85,22 @@ typedef struct {
  * stdin/stdout is not a terminal.
  */
 int ut_run(UtItem *root, const UtApp *app);
+
+/*
+ * Run the editor on a terminal the host provides instead of stdin/stdout: `in_fd`
+ * and `out_fd` (may be the same fd, e.g. a pseudo-terminal's slave). For a host with
+ * no terminal of its own, such as an app that draws a terminal view over a pty.
+ * In this mode the engine installs no signal handlers and no atexit hook: the host
+ * reports a size change with ut_notify_resize() (after setting the pty's size), and
+ * ends a run with ut_request_quit() or by hanging the terminal up (closing the pty's
+ * master), which the engine reads as a quit without saving.  One run at a time: the
+ * engine's state is global.  Returns as ut_run(); -1 on Windows (not available).
+ */
+int ut_run_fd(UtItem *root, const UtApp *app, int in_fd, int out_fd);
+
+/* For a running editor, from any thread or a signal handler. */
+void ut_notify_resize(void);   /* the terminal changed size: re-read it and redraw  */
+void ut_request_quit(void);    /* quit as Ctrl-C does (nothing is saved)           */
 
 /* Load / save a .config-style file without entering the UI. 0 on success. */
 int ut_load(UtItem *root, const UtApp *app, const char *path);
