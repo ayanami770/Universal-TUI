@@ -89,7 +89,9 @@ int main(int argc, char **argv)
         NULL,                                    /* default instructions*/
         "acme-server demo",                      /* --version name      */
         "\n*** Configuration saved. ***\n\n",    /* saved epilogue      */
-        -1                                       /* ascii: auto         */
+        -1,                                      /* ascii: auto         */
+        0,                                       /* min_cols: 80        */
+        0                                        /* instructions: always*/
     };
     return ut_main(&root, &app, argc, argv);
 }

@@ -967,6 +967,21 @@ static const char *INSTR =
 "Help, </> for Search.  Legend: [*] built-in  [ ] excluded  <M> module  "
 "< > module capable";
 
+/* The narrowest terminal this app's menu is laid out for (UtApp.min_cols). */
+static int min_cols(void)
+{
+    int m = g_app ? g_app->min_cols : 0;
+    if (m <= 0 || m >= MIN_COLS) return MIN_COLS;
+    return m < UT_MIN_COLS_FLOOR ? UT_MIN_COLS_FLOOR : m;
+}
+
+/* Whether the header blurb is drawn on this terminal (UtApp.instructions_min_rows). */
+static int show_instructions(void)
+{
+    int r = g_app ? g_app->instructions_min_rows : 0;
+    return r == 0 || (r > 0 && g_rows >= r);
+}
+
 static void draw_backdrop(void)
 {
     int i;
@@ -1035,16 +1050,19 @@ static void draw_menu(void)
 
     draw_backdrop();
 
-    if (g_cols < MIN_COLS || g_rows < MIN_ROWS) {
+    if (g_cols < min_cols() || g_rows < MIN_ROWS) {
         const char *msg = "Your display is too small to run Menuconfig!";
-        const char *msg2 = "It must be at least 19 lines by 80 columns.";
+        char msg2[64];
+        snprintf(msg2, sizeof msg2, "It must be at least %d lines by %d columns.", MIN_ROWS, min_cols());
         puts_at((g_cols - (int)strlen(msg)) / 2, g_rows / 2 - 1, msg, C_WHITE, C_BLUE, 1);
         puts_at((g_cols - (int)strlen(msg2)) / 2, g_rows / 2, msg2, C_WHITE, C_BLUE, 0);
         g_list_h = 0; g_btn_n = 0;
         return;
     }
 
-    dw = g_cols - 8;  if (dw > 130) dw = 130;
+    /* Below 80 columns (an app that asked for it: UtApp.min_cols) the box takes the whole width but its
+     * shadow, so the five buttons still fit at UT_MIN_COLS_FLOOR. */
+    dw = g_cols - (g_cols >= MIN_COLS ? 8 : 2);  if (dw > 130) dw = 130;
     dh = g_rows - 4;
     dx = (g_cols - dw) / 2;
     dy = 2 + (g_rows - 2 - dh) / 2;
@@ -1054,8 +1072,10 @@ static void draw_menu(void)
     draw_box(dx, dy, dw, dh, C_WHITE);
     draw_title(dx, dy, dw, g_depth ? m->name : g_app->title);
 
-    ilines = wrap_text(g_app->instructions ? g_app->instructions : INSTR,
-                       dw - 4, dx + 2, dy + 1, 1, C_BLACK, C_WHITE, 0);
+    ilines = show_instructions()
+           ? wrap_text(g_app->instructions ? g_app->instructions : INSTR,
+                       dw - 4, dx + 2, dy + 1, 1, C_BLACK, C_WHITE, 0)
+           : 0;
 
     mby = dy + 1 + ilines;
     mbh = (dy + dh - 4) - mby + 1;
@@ -1209,7 +1229,9 @@ static int inputbox(const char *title, const char *prompt, char *val,
         Key k;
         draw_menu();
         w = clampw(66);
-        h = 11;
+        /* the prompt above the field: 3 lines at 66 columns, more on a narrow terminal (UtApp.min_cols) */
+        h = wrap_text(prompt, w - 4, 0, 0, 0, 0, 0, 0);
+        h = (h < 3 ? 3 : h) + 8;
         modal_frame(&x, &y, w, h, title);
         wrap_text(prompt, w - 4, x + 2, y + 2, 1, C_BLACK, C_WHITE, 0);
         fw = w - 8; if (fw < 1) fw = 1;

@@ -10,7 +10,7 @@ static UtItem items[] = {
     UT_BOOL(2, "Flag", "FLAG", NULL),
 };
 static UtItem root = UT_ROOT("Test", items);
-static UtApp app = { "Test", "Test", "test.config", "TEST", NULL, NULL, NULL, 1 };
+static UtApp app = { "Test", "Test", "test.config", "TEST", NULL, NULL, NULL, 1, 0, 0 };
 
 int main(void)
 {

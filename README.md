@@ -53,7 +53,9 @@ int main(int argc, char **argv)
         NULL,                        /* instructions (NULL = default)           */
         "myapp-config",              /* --version name     */
         "\nSaved.\n",                /* epilogue on save   */
-        -1                           /* ascii: -1 auto, 0 unicode, 1 ascii      */
+        -1,                          /* ascii: -1 auto, 0 unicode, 1 ascii      */
+        0,                           /* min_cols: 0 = 80 (see "Small screens")  */
+        0                            /* instructions_min_rows: 0 = always       */
     };
     return ut_main(&root, &app, argc, argv);
 }
@@ -118,6 +120,24 @@ sets the pty's size (`TIOCSWINSZ` on the master) and calls `ut_notify_resize()`,
 and ends a run with `ut_request_quit()` or by closing the master — a hung-up
 terminal reads as a quit without saving, never as a busy loop. The engine's state
 is global, so one run at a time. Not available on Windows (returns -1).
+
+### Small screens
+
+The menu needs 80 columns by 19 rows unless the app says otherwise. A host whose
+terminal can be narrow (a phone held upright) sets `UtApp.min_cols` to anything
+from `UT_MIN_COLS_FLOOR` (52, where the main menu's five buttons just fit) to 79:
+below 80 columns the dialog takes the whole width but its shadow, and dialogs
+shrink to fit as before. `0` (or 80 and up) keeps the 80-column minimum, so an
+app that sets nothing is unchanged.
+
+`UtApp.instructions_min_rows` decides when the header blurb is drawn: `0` always
+(as before), `N > 0` only on a terminal at least `N` rows tall (its lines go to
+the list on a short one, e.g. a phone held sideways), `-1` never. It is read on
+every redraw, so a terminal that changes size mid-run gains or loses it.
+
+Both fields were added at the end of `UtApp` in 1.3; a positional initializer
+written for 1.2 still compiles and keeps the 1.2 behaviour (with
+`-Wmissing-field-initializers` it warns until the two zeros are added).
 
 `.config` format: `CONFIG_<prefix>_<SYM>=y|m|"str"|int` and
 `# CONFIG_<prefix>_<SYM> is not set`, matching Linux Kconfig. With an empty

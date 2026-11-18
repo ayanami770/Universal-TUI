@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define UTUI_VERSION "1.2"
+#define UTUI_VERSION "1.3"
 
 /* Item kinds (stored in UtItem.type). */
 enum {
@@ -76,7 +76,19 @@ typedef struct {
     const char *app_name;       /* shown by --version (NULL => "utui")          */
     const char *saved_epilogue; /* printed after a saved exit (NULL => none)    */
     int   ascii;                /* 1 force ASCII, 0 force Unicode, <0 auto      */
+    /* Since 1.3 (zero keeps the 1.2 behaviour):                                */
+    int   min_cols;             /* narrowest terminal the app accepts: 0 or
+                                   >= 80 => 80; UT_MIN_COLS_FLOOR..79 lays the
+                                   menu out to fit (a phone held upright);
+                                   below the floor it is the floor              */
+    int   instructions_min_rows;/* the header blurb is drawn only on a terminal
+                                   at least this tall: 0 => always, <0 => never
+                                   (its lines go to the list instead)           */
 } UtApp;
+
+/* The narrowest terminal the engine can lay out: the main menu's five buttons
+ * (48 columns) inside a box with its frame and its shadow. */
+#define UT_MIN_COLS_FLOOR 52
 
 /*
  * Run the interactive editor over `root` (a UT_TYPE_MENU item).  The engine
